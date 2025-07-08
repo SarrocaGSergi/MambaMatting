@@ -1,5 +1,47 @@
 import torch
-import torch.nn.functional as F
+from torch.nn import functional as F
+
+# --------------------------------------------------------------------------------- Train Loss
+
+
+def matting_loss(pred_pha, true_pha):
+    """
+    Args:
+        pred_fgr: Shape(B, T, 3, H, W)
+        pred_pha: Shape(B, T, 1, H, W)
+        true_fgr: Shape(B, T, 3, H, W)
+        true_pha: Shape(B, T, 1, H, W)
+    """
+    loss = dict()
+    # Alpha losses
+    loss['pha_l1'] = F.l1_loss(pred_pha, true_pha)
+    # loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
+    loss['pha_laplacian'] = laplacian_loss(pred_pha, true_pha)
+    # loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
+    #                                    true_pha[:, 1:] - true_pha[:, :-1]) * 5
+    # # Foreground losses
+    # true_msk = true_pha.gt(0)
+    # pred_fgr = pred_fgr * true_msk
+    # true_fgr = true_fgr * true_msk
+    # loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
+    # loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
+    #                                    true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
+    # Total
+    loss['total'] = loss['pha_l1']  + loss['pha_laplacian'] \
+                  # + loss['fgr_l1'] + loss['fgr_coherence'] + loss['pha_coherence']
+    return loss
+
+def segmentation_loss(pred_seg, true_seg):
+    """
+    Args:
+        pred_seg: Shape(B, T, 1, H, W)
+        true_seg: Shape(B, T, 1, H, W)
+    """
+    return F.binary_cross_entropy_with_logits(pred_seg, true_seg)
+
+
+# ----------------------------------------------------------------------------- Laplacian Loss
+
 
 def laplacian_loss(pred, true, max_levels=5):
     kernel = gauss_kernel(device=pred.device, dtype=pred.dtype)
@@ -33,7 +75,7 @@ def gauss_kernel(device='cpu', dtype=torch.float32):
     return kernel
 
 def gauss_convolution(img, kernel):
-    B, C, H, W = img.shape[-4:]
+    B, C, H, W = img.shape
     img = img.reshape(B * C, 1, H, W)
     img = F.pad(img, (2, 2, 2, 2), mode='reflect')
     img = F.conv2d(img, kernel)
@@ -46,7 +88,7 @@ def downsample(img, kernel):
     return img
 
 def upsample(img, kernel):
-    B, C, H, W = img.shape[-4:]
+    B, C, H, W = img.shape
     out = torch.zeros((B, C, H * 2, W * 2), device=img.device, dtype=img.dtype)
     out[:, :, ::2, ::2] = img * 4
     out = gauss_convolution(out, kernel)
@@ -58,48 +100,3 @@ def crop_to_even_size(img):
     W = W - W % 2
     return img[:, :, :H, :W]
 
-
-def matting_loss(preds, true_pha, weights=None):
-    """
-    Compute matting loss with optional deep supervision.
-
-    Args:
-        preds (Tensor or list of Tensors): Predicted alpha matte(s), each of shape (B, 1, H, W).
-        true_pha (Tensor): Ground truth alpha matte, shape (B, 1, H, W).
-        weights (list of float, optional): Weights for each prediction if deep supervision is enabled.
-
-    Returns:
-        dict: {
-            'pha_l1': total L1 loss,
-            'pha_laplacian': total Laplacian loss,
-            'total': total combined loss
-        }
-    """
-
-    # Ensure preds is a list
-    if not isinstance(preds, list):
-        preds = [preds]
-
-    # Default weights: full weight for final output, smaller for intermediates
-    if weights is None:
-        weights = [1.0] + [0.5] * (len(preds) - 1)
-
-    # Initialize losses
-    total_loss = 0.0
-    l1_total = 0.0
-    lap_total = 0.0
-
-    for pred, weight in zip(preds, weights):
-        l1 = F.l1_loss(pred, true_pha)
-        lap = laplacian_loss(pred, true_pha)
-        total = l1 + lap
-
-        l1_total += l1 * weight
-        lap_total += lap * weight
-        total_loss += total * weight
-
-    return {
-        'pha_l1': l1_total,
-        'pha_laplacian': lap_total,
-        'total': total_loss
-    }

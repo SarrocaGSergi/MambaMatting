@@ -1,53 +1,64 @@
 import os
 import random
+import torch
 from torch.utils.data import Dataset
 from PIL import Image
+import torchvision.transforms as T
 
 from .augmentation import MotionAugmentation
 
 
 class ImageMatteDataset(Dataset):
-    def __init__(self,
-                 imagematte_dir,
-                 background_image_dir,
-                 seq_length,
-                 # background_video_dir,
-                 size,
-                 transform):
+    def __init__(self, imagematte_dir, background_image_dir, background_video_dir, size, seq_length, seq_sampler,
+                 transform, static=True):
+
         self.imagematte_dir = imagematte_dir
         self.imagematte_files = os.listdir(os.path.join(imagematte_dir, 'fgr'))
         self.background_image_dir = background_image_dir
         self.background_image_files = os.listdir(background_image_dir)
-        # self.background_video_dir = background_video_dir
-        # self.background_video_clips = os.listdir(background_video_dir)
-        # self.background_video_frames = [sorted(os.listdir(os.path.join(background_video_dir, clip)))
-        #                                 for clip in self.background_video_clips]
+        self.background_video_dir = background_video_dir
+        self.background_video_clips = os.listdir(background_video_dir)
+        self.background_video_frames = [sorted(os.listdir(os.path.join(background_video_dir, clip)))
+                                        for clip in self.background_video_clips]
         self.seq_length = seq_length
-        # self.seq_sampler = seq_sampler
+        self.seq_sampler = seq_sampler
         self.size = size
+        self.static = static
         self.transform = transform
 
     def __len__(self):
-        #return max(len(self.imagematte_files), len(self.background_image_files) + len(self.background_video_clips))
-        return max(len(self.imagematte_files), len(self.background_image_files))
+        return max(len(self.imagematte_files), len(self.background_image_files) + len(self.background_video_clips))
 
     def __getitem__(self, idx):
-        """
-        if random.random() < 0.5:
-            bgrs = self._get_random_image_background()
+        # if random.random() < 0.5:
+        #     bgrs = self._get_random_image_background()
+        # else:
+        #     bgrs = self._get_random_video_background()
+
+        if self.static:
+            bgrs = self._get_static_bg()
+            fgrs, phas = self._get_static_image(idx)
         else:
-            bgrs = self._get_random_video_background()
-        """
-        bgrs = self._get_random_image_background()
-        fgrs, phas = self._get_imagematte(idx)
+            bgrs = self._get_random_image_background()
+            fgrs, phas = self._get_imagematte(idx)
 
         if self.transform is not None:
-            fgr = self.transform(fgrs[0])
-            pha = self.transform(phas[0])
-            bgr = self.transform(bgrs[0])
-            return fgr, pha, bgr
+            return self.transform(fgrs, phas, bgrs)
         else:
-            return fgrs[0], phas[0], bgrs[0]
+            to_tensor = T.Compose([T.Resize((256, 512)), T.CenterCrop((256, 512)), T.ToTensor()])
+            fgrs = to_tensor(fgrs)
+            phas = to_tensor(phas)
+            bgrs = to_tensor(bgrs)
+            return fgrs, phas, bgrs
+
+    def _get_static_image(self, idx):
+        with Image.open(os.path.join(self.imagematte_dir, 'fgr',
+                                     self.imagematte_files[idx % len(self.imagematte_files)])) as fgr, \
+                Image.open(os.path.join(self.imagematte_dir, 'pha',
+                                        self.imagematte_files[idx % len(self.imagematte_files)])) as pha:
+            fgr = self._downsample_if_needed(fgr.convert('RGB'))
+            pha = self._downsample_if_needed(pha.convert('L'))
+        return fgr, pha
 
     def _get_imagematte(self, idx):
         with Image.open(os.path.join(self.imagematte_dir, 'fgr',
@@ -59,6 +70,12 @@ class ImageMatteDataset(Dataset):
         fgrs = [fgr] * self.seq_length
         phas = [pha] * self.seq_length
         return fgrs, phas
+
+    def _get_static_bg(self):
+        with Image.open(os.path.join(self.background_image_dir, self.background_image_files[
+            random.choice(range(len(self.background_image_files)))])) as bgr:
+            bgr = self._downsample_if_needed(bgr.convert('RGB'))
+        return bgr
 
     def _get_random_image_background(self):
         with Image.open(os.path.join(self.background_image_dir, self.background_image_files[
@@ -83,8 +100,8 @@ class ImageMatteDataset(Dataset):
 
     def _downsample_if_needed(self, img):
         w, h = img.size
-        if min(w, h) > self.size[0]:
-            scale = self.size[0] / min(w, h)
+        if min(w, h) > self.size:
+            scale = self.size / min(w, h)
             w = int(scale * w)
             h = int(scale * h)
             img = img.resize((w, h))

@@ -113,6 +113,7 @@ class MotionAugmentation:
     def _motion_affine(self, *imgs):
         config = dict(degrees=(-10, 10), translate=(0.1, 0.1),
                       scale_ranges=(0.9, 1.1), shears=(-5, 5), img_size=imgs[0][0].size)
+
         angleA, (transXA, transYA), scaleA, (shearXA, shearYA) = transforms.RandomAffine.get_params(**config)
         angleB, (transXB, transYB), scaleB, (shearXB, shearYB) = transforms.RandomAffine.get_params(**config)
 

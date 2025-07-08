@@ -447,38 +447,6 @@ class VSSMEncoder(nn.Module):
 
         return x_ret
 
-
-class FeatureFusionBlock(nn.Module):
-    def __init__(self, in_channels1, in_channels2, out_channels, method="concat"):
-        super().__init__()
-        self.method = method
-        if method == "concat":
-            in_channels = in_channels1 + in_channels2
-        elif method == "add":
-            assert in_channels1 == in_channels2, "Add method requires matching input channels."
-            in_channels = in_channels1
-        else:
-            raise ValueError("method must be either 'concat' or 'add'")
-
-        self.fuse = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1),
-            nn.InstanceNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x1, x2):
-        # Make sure x1 and x2 have same spatial size
-        if x1.shape[-2:] != x2.shape[-2:]:
-            x2 = F.interpolate(x2, size=x1.shape[-2:], mode='bilinear', align_corners=False)
-
-        if self.method == "concat":
-            x = torch.cat([x1, x2], dim=1)
-        else:  # method == "add"
-            x = x1 + x2
-
-        return self.fuse(x)
-
-
 class SwinUMamba(nn.Module):
     def __init__(self, in_chans=3, out_chans=13, feat_size=[48, 96, 192, 384, 768], drop_path_rate=0,
                  layer_scale_init_value=1e-6, hidden_size: int = 768, norm_name="instance", res_block: bool = True,
@@ -495,8 +463,6 @@ class SwinUMamba(nn.Module):
             nn.Conv2d(in_chans, feat_size[0], kernel_size=7, stride=2, padding=3),
             nn.InstanceNorm2d(feat_size[0], eps=1e-5, affine=True),
         )
-
-        self.fusion_block = FeatureFusionBlock(feat_size[0], feat_size[0], feat_size[0], method="concat")
 
         self.spatial_dims = spatial_dims
         self.vssm_encoder = VSSMEncoder(patch_size=2, in_chans=feat_size[0])
@@ -613,18 +579,10 @@ class SwinUMamba(nn.Module):
                 out_channels=self.out_chans
             ))
 
-        self.sigmoid = nn.Sigmoid()
-
     def forward(self, x_in):
-        # Original Swin-UMamba first layers
-        # x1 = self.stem(x_in)
-        # vss_outs = self.vssm_encoder(x1)
-        # enc1 = self.encoder1(x_in)
-        # Fusion method to take profit from both independent early feature extractors
         x1 = self.stem(x_in)
+        vss_outs = self.vssm_encoder(x1)
         enc1 = self.encoder1(x_in)
-        fused_x1 = self.stem_encoder_fusion(x1, enc1)
-        vss_outs = self.vssm_encoder(fused_x1)
         enc2 = self.encoder2(vss_outs[0])
         enc3 = self.encoder3(vss_outs[1])
         enc4 = self.encoder4(vss_outs[2])
@@ -637,18 +595,15 @@ class SwinUMamba(nn.Module):
         dec0 = self.decoder2(dec1, enc1)
         dec_out = self.decoder1(dec0)
 
-
         if self.deep_supervision:
             feat_out = [dec_out, dec1, dec2, dec3]
             out = []
             for i in range(4):
                 pred = self.out_layers[i](feat_out[i])
-                # out.append(pred) Original Network output
-                alpha_pred = self.sigmoid(pred)
-                out.append(alpha_pred)
+                out.append(torch.clamp(pred, 0., 1.))
         else:
             out = self.out_layers[0](dec_out)
-            out = self.sigmoid(out) # Added Sigmoid output to get values between [0, 1]
+            out = torch.clamp(out, 0., 1.)
 
         return out
 
@@ -664,16 +619,13 @@ class SwinUMamba(nn.Module):
             param.requires_grad = True
 
 
-def load_pretrained_ckpt(
-        model,
-        ckpt_path="../upernet_vssm_4xb4-160k_ade20k-512x512_tiny_iter_160000.pth"
-):
+def load_pretrained_ckpt(model, ckpt_path="../vssmtiny_dp01_ckpt_epoch_292.pth"):
     print(f"Loading weights from: {ckpt_path}")
     skip_params = ["norm.weight", "norm.bias", "head.weight", "head.bias",
                    "patch_embed.proj.weight", "patch_embed.proj.bias",
                    "patch_embed.norm.weight", "patch_embed.norm.weight"]
 
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location='cpu')
     model_dict = model.state_dict()
     for k, v in ckpt['model'].items():
         if k in skip_params:
@@ -700,11 +652,9 @@ if __name__ == "__main__":
     from pathlib import Path
 
     _ROOT_ = Path(__file__).parents[2]
-
     model = SwinUMamba(in_chans=3, out_chans=1, feat_size=[48, 96, 192, 384, 768], deep_supervision=True,
-                       hidden_size=768).to('cuda')
-
-    model.load_state_dict(torch.load("../upernet_vssm_4xb4-160k_ade20k-512x512_tiny_iter_160000.pth", weights_only=True), strict=False)
+                       hidden_size=768)
+    model = load_pretrained_ckpt(model=model)
     print(model)
 
 
