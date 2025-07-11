@@ -1,13 +1,13 @@
-import re
+import sys
 import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import re
 import torch
 import socket
 from torchvision.utils import make_grid
-from dataset.imagematte import ImageMatteDataset, ImageMatteAugmentation
-from dataset.augmentation import (
-    TrainFrameSampler,
-    ValidFrameSampler
-)
+from dataset.imagematte import ImageMatteDataset
+
 from torch.utils.tensorboard import SummaryWriter
 from train_config import DATA_PATHS
 from SwinUamba import SwinUMamba
@@ -21,9 +21,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from src.train_loss import matting_loss
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from pathlib import Path
+
 
 class Trainer(object):
     def __init__(self, rank, world_size, scratch=True, finetune=False):
+        self.root = Path(__file__).parents[1].resolve()
         self.scratch = scratch
         self.finetune = finetune
         self.init_distributed(rank, world_size)
@@ -42,15 +45,16 @@ class Trainer(object):
         self.log("World Size: {}".format(self.world_size))
         os.environ['MASTER_ADDR'] = 'localhost'
         if 'MASTER_PORT' not in os.environ.keys():
-            self.port = str(self._find_free_network_port())
-            self.log(f"Using port {self.port}")
-            os.environ['MASTER_PORT'] = self.port  # str(port)
+            # self.port = str(self._find_free_network_port())
+            # self.log(f"Using port {self.port}")
+            os.environ['MASTER_PORT'] = str(12789)
+        # str(port)
         dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
 
     def init_model(self):
         self.log('Initializing model')
         self.network = SwinUMamba(in_chans=3, out_chans=1, feat_size=[48, 96, 192, 384, 768], deep_supervision=True,
-                       hidden_size=768).to(self.rank)
+                                  hidden_size=768).to(self.rank)
         self._load_ckpt()
         self.log("Parallelizing model")
         self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
@@ -61,10 +65,10 @@ class Trainer(object):
     def init_writer(self):
         if self.rank == 0:
             self.log('Initializing writer')
-            self.writer = SummaryWriter('Experiments/log_dir/experiment_00')
+            self.writer = SummaryWriter('Experiments/log_dir/imagematte/')
 
     def init_optimizer(self):
-        self.num_epochs = 1
+        self.num_epochs = 50
         self.initial_lr = 1e-4
         self.weight_decay = 5e-2
         self.enable_deep_supervision = True
@@ -77,13 +81,14 @@ class Trainer(object):
             weight_decay=self.weight_decay,
             eps=1e-5,
             betas=(0.9, 0.999),
-            )
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.num_epochs, eta_min=1e-6)
+        )
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.num_epochs, eta_min=1e-6, verbose=False)
         self.log(f"Using optimizer {self.optimizer}")
         self.log(f"Using scheduler {self.scheduler}")
 
     def train(self):
         self.log("Training started")
+        self.iters = 0
         for epoch in range(0, self.num_epochs):
             self.epoch = epoch
             self.step = epoch * len(self.dataloader_lr_train)
@@ -91,7 +96,7 @@ class Trainer(object):
             # Create tensors to hold cumulative loss and count on the current device.
             total_loss = torch.tensor(0.0, device=self.rank)
             total_count = torch.tensor(0, device=self.rank)
-            iters = 0
+
             for true_fgr, true_pha, true_bgr in tqdm(self.dataloader_lr_train, disable=False, dynamic_ncols=True):
                 true_fgr = true_fgr.to(self.rank, non_blocking=True)
                 true_pha = true_pha.to(self.rank, non_blocking=True)
@@ -112,15 +117,18 @@ class Trainer(object):
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-                iters += 1
-                if self.rank == 0 and self.step % 300 == 0:
+                self.iters += 1
+                if self.rank == 0 and self.iters % 50 == 0:
                     for loss_name, loss_value in loss.items():
-                        self.writer.add_scalar(f'train_{loss_name}', loss_value, iters)
+                        self.writer.add_scalar(f'train_{loss_name}', loss_value, self.iters)
 
-                if self.rank == 0 and self.step % 300 == 0:
-                    self.writer.add_image(f'train_pred_pha',make_grid(pred_pha[0], padding=2), iters)
-                    self.writer.add_image(f'train_true_pha',make_grid(true_pha, padding=2), iters)
-                    self.writer.add_image(f'train_true_src',make_grid(true_src, padding=2), iters)
+                if self.rank == 0 and self.iters % 50 == 0:
+                    self.writer.add_image(f'train_pred_pha',
+                                          make_grid(pred_pha[0], nrow=pred_pha[0].size(0), padding=2), self.iters)
+                    self.writer.add_image(f'train_true_pha', make_grid(true_pha, nrow=true_pha.size(0), padding=2),
+                                          self.iters)
+                    self.writer.add_image(f'train_true_src', make_grid(true_src, nrow=true_src.size(0), padding=2),
+                                          self.iters)
 
             # Aggregate results from all ranks.
             dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
@@ -153,6 +161,14 @@ class Trainer(object):
                     total_loss += matting_loss(pred_pha[0], true_pha)['total'].item() * batch_size
                     total_count += batch_size
 
+            if self.rank == 0:
+                self.writer.add_image(f'val_pred_pha', make_grid(pred_pha[0], nrow=pred_pha[0].size(0), padding=2),
+                                      self.iters)
+                self.writer.add_image(f'val_true_pha', make_grid(true_pha, nrow=true_pha.size(0), padding=2),
+                                      self.iters)
+                self.writer.add_image(f'val_true_src', make_grid(true_src, nrow=true_src.size(0), padding=2),
+                                      self.iters)
+
         # Aggregate results from all ranks.
         dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
@@ -181,7 +197,8 @@ class Trainer(object):
         self.model_ddp.train()
         dist.barrier()
 
-    def _load_ckpt(self, ckpt_path="../vssmtiny_dp01_ckpt_epoch_292.pth"):
+    def _load_ckpt(self):
+        ckpt_path = os.path.join(self.root, "vssmtiny_dp01_ckpt_epoch_292.pth")
         self.log(f"Loading weights from: {ckpt_path}")
         skip_params = ["norm.weight", "norm.bias", "head.weight", "head.bias",
                        "patch_embed.proj.weight", "patch_embed.proj.bias",
@@ -228,24 +245,18 @@ class Trainer(object):
             print(f'[GPU{self.rank}] {msg}')
 
     def init_datasets(self):
-        size_lr = (512, 256)
+        size_lr = (1920, 1080)
 
         self.dataset_lr_train = ImageMatteDataset(
-            imagematte_dir=DATA_PATHS['am2k']['train'],
+            imagematte_dir=DATA_PATHS['imagematte']['train'],
             background_image_dir=DATA_PATHS['bg20k']['train'],
-            background_video_dir=DATA_PATHS['background_videos']['train'],
             size=size_lr[0],
-            seq_length=5,
-            seq_sampler=TrainFrameSampler(),
             transform=None)
 
         self.dataset_valid = ImageMatteDataset(
-            imagematte_dir=DATA_PATHS['am2k']['valid'],
+            imagematte_dir=DATA_PATHS['imagematte']['valid'],
             background_image_dir=DATA_PATHS['background_images']['valid'],
-            background_video_dir=DATA_PATHS['background_videos']['valid'],
             size=size_lr[0],
-            seq_length=5,
-            seq_sampler=ValidFrameSampler(),
             transform=None)
 
         # Matting dataloaders:
@@ -257,7 +268,7 @@ class Trainer(object):
 
         self.dataloader_lr_train = DataLoader(
             dataset=self.dataset_lr_train,
-            batch_size=15,
+            batch_size=8,
             num_workers=8,
             sampler=self.datasampler_lr_train,
             pin_memory=True)
@@ -272,21 +283,16 @@ class Trainer(object):
         self.dataloader_valid = DataLoader(
             dataset=self.dataset_valid,
             sampler=self.datasampler_valid,
-            batch_size=15,
+            batch_size=8,
             num_workers=8,
             pin_memory=True,
             drop_last=True)
 
+
 if __name__ == '__main__':
-    import builtins
-    import traceback
+    import warnings
 
-    def traced_print(*args, **kwargs):
-        traceback.print_stack(limit=3)
-        builtins._original_print(*args, **kwargs)
-
-    builtins._original_print = print
-    builtins.print = traced_print
+    warnings.filterwarnings("ignore", category=UserWarning)
 
     world_size = torch.cuda.device_count()
     mp.spawn(

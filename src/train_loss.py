@@ -1,4 +1,5 @@
 import torch
+import kornia
 from torch.nn import functional as F
 
 # --------------------------------------------------------------------------------- Train Loss
@@ -17,6 +18,7 @@ def matting_loss(pred_pha, true_pha):
     loss['pha_l1'] = F.l1_loss(pred_pha, true_pha)
     # loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
     loss['pha_laplacian'] = laplacian_loss(pred_pha, true_pha)
+    # loss['gradient'] = gradient_loss(pred_pha, true_pha)
     # loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
     #                                    true_pha[:, 1:] - true_pha[:, :-1]) * 5
     # # Foreground losses
@@ -27,7 +29,7 @@ def matting_loss(pred_pha, true_pha):
     # loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
     #                                    true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
     # Total
-    loss['total'] = loss['pha_l1']  + loss['pha_laplacian'] \
+    loss['total'] = loss['pha_l1']  + loss['pha_laplacian'] # + loss['gradient'] \
                   # + loss['fgr_l1'] + loss['fgr_coherence'] + loss['pha_coherence']
     return loss
 
@@ -99,4 +101,16 @@ def crop_to_even_size(img):
     H = H - H % 2
     W = W - W % 2
     return img[:, :, :H, :W]
+
+
+def gradient_loss(pred, target):
+    # Expecting shape [B, 1, H, W]
+    pred_grad = kornia.filters.sobel(pred)
+    target_grad = kornia.filters.sobel(target)
+
+    # sobel returns shape [B, 2, H, W], compute magnitude
+    pred_mag = torch.linalg.norm(pred_grad, dim=1, keepdim=True)
+    target_mag = torch.linalg.norm(target_grad, dim=1, keepdim=True)
+
+    return F.l1_loss(pred_mag, target_mag)
 
