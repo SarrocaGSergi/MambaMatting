@@ -307,17 +307,8 @@ class VSSLayer(nn.Module):
     """
 
     def __init__(
-            self,
-            dim,
-            depth,
-            attn_drop=0.,
-            drop_path=0.,
-            norm_layer=nn.LayerNorm,
-            downsample=None,
-            use_checkpoint=False,
-            d_state=16,
-            **kwargs,
-    ):
+            self, dim, depth, attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, downsample=None,
+            use_checkpoint=False, d_state=16, **kwargs, ):
         super().__init__()
         self.dim = dim
         self.use_checkpoint = use_checkpoint
@@ -580,6 +571,9 @@ class SwinUMamba(nn.Module):
             ))
 
     def forward(self, x_in):
+        if x_in.ndim == 5:
+            B, F, C, H, W = x_in.shape
+            x_in = x_in.view(B * F, C, H, W)
         x1 = self.stem(x_in)
         vss_outs = self.vssm_encoder(x1)
         enc1 = self.encoder1(x_in)
@@ -600,6 +594,9 @@ class SwinUMamba(nn.Module):
             out = []
             for i in range(4):
                 pred = self.out_layers[i](feat_out[i])
+                if pred.ndim == 4:
+                    N, C, H, W = pred.shape
+                    pred = pred.view(B, F, C, H, W)
                 out.append(torch.clamp(pred, 0., 1.))
         else:
             out = self.out_layers[0](dec_out)
@@ -652,10 +649,11 @@ if __name__ == "__main__":
     from pathlib import Path
 
     _ROOT_ = Path(__file__).parents[2]
+    x = torch.rand(2, 5, 3, 224, 224).to("cuda")
     model = SwinUMamba(in_chans=3, out_chans=1, feat_size=[48, 96, 192, 384, 768], deep_supervision=True,
-                       hidden_size=768)
-    model = load_pretrained_ckpt(model=model)
-    print(model)
+                       hidden_size=768).to("cuda")
+    pred = model(x)
+
 
 
 

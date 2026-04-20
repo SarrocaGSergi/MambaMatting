@@ -53,12 +53,25 @@ class MotionAugmentation:
         phas = torch.stack([F.to_tensor(pha) for pha in phas])
         bgrs = torch.stack([F.to_tensor(bgr) for bgr in bgrs])
 
+        '''        
+        i, j, h, w = transforms.RandomResizedCrop.get_params(fgrs, scale=(1, 1), ratio=self.aspect_ratio_range)
+
+        # Round crop size to multiple of 64
+        h = (h // 64) * 64
+        w = (w // 64) * 64
+
+        fgrs = F.resized_crop(fgrs, i, j, h, w, (h, w), interpolation=F.InterpolationMode.BILINEAR)
+        phas = F.resized_crop(phas, i, j, h, w, (h, w), interpolation=F.InterpolationMode.BILINEAR)
+        bgrs = F.resized_crop(bgrs, i, j, h, w, (h, w), interpolation=F.InterpolationMode.BILINEAR)
+        '''
+
         # Resize
         params = transforms.RandomResizedCrop.get_params(fgrs, scale=(1, 1), ratio=self.aspect_ratio_range)
         fgrs = F.resized_crop(fgrs, *params, self.size, interpolation=F.InterpolationMode.BILINEAR)
         phas = F.resized_crop(phas, *params, self.size, interpolation=F.InterpolationMode.BILINEAR)
         params = transforms.RandomResizedCrop.get_params(bgrs, scale=(1, 1), ratio=self.aspect_ratio_range)
         bgrs = F.resized_crop(bgrs, *params, self.size, interpolation=F.InterpolationMode.BILINEAR)
+
 
         # Horizontal flip
         if random.random() < self.prob_hflip:
