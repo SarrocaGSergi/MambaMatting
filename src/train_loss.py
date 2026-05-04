@@ -5,7 +5,7 @@ from torch.nn import functional as F
 # --------------------------------------------------------------------------------- Train Loss
 
 
-def matting_loss(pred_pha, true_pha):
+def matting_loss(pred_pha, pred_fgr, true_pha, true_fgr):
     """
     Args:
         pred_fgr: Shape(B, T, 3, H, W)
@@ -16,21 +16,19 @@ def matting_loss(pred_pha, true_pha):
     loss = dict()
     # Alpha losses
     loss['pha_l1'] = F.l1_loss(pred_pha, true_pha)
-    # loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
-    loss['pha_laplacian'] = laplacian_loss(pred_pha, true_pha)
-    # loss['gradient'] = gradient_loss(pred_pha, true_pha)
-    # loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
-    #                                    true_pha[:, 1:] - true_pha[:, :-1]) * 5
-    # # Foreground losses
-    # true_msk = true_pha.gt(0)
-    # pred_fgr = pred_fgr * true_msk
-    # true_fgr = true_fgr * true_msk
-    # loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
-    # loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
-    #                                    true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
+    loss['pha_laplacian'] = laplacian_loss(pred_pha.flatten(0, 1), true_pha.flatten(0, 1))
+    loss['pha_coherence'] = F.mse_loss(pred_pha[:, 1:] - pred_pha[:, :-1],
+                                        true_pha[:, 1:] - true_pha[:, :-1]) * 5
+
+    # Foreground losses
+    true_msk = true_pha # .gt(0)
+    pred_fgr = pred_fgr * true_msk
+    true_fgr = true_fgr * true_msk
+    loss['fgr_l1'] = F.l1_loss(pred_fgr, true_fgr)
+    loss['fgr_coherence'] = F.mse_loss(pred_fgr[:, 1:] - pred_fgr[:, :-1],
+                                       true_fgr[:, 1:] - true_fgr[:, :-1]) * 5
     # Total
-    loss['total'] = loss['pha_l1']  + loss['pha_laplacian'] # + loss['gradient'] \
-                  # + loss['fgr_l1'] + loss['fgr_coherence'] + loss['pha_coherence']
+    loss['total'] = (loss['pha_l1']  + loss['pha_laplacian'] + loss['pha_coherence'] + loss['fgr_l1'] + loss['fgr_coherence'])
     return loss
 
 def segmentation_loss(pred_seg, true_seg):
@@ -44,8 +42,23 @@ def segmentation_loss(pred_seg, true_seg):
 
 # ----------------------------------------------------------------------------- Laplacian Loss
 
-
 def laplacian_loss(pred, true, max_levels=5):
+    kernel = gauss_kernel(device=pred.device, dtype=pred.dtype)
+    pred_pyramid = laplacian_pyramid(pred, kernel, max_levels)
+    true_pyramid = laplacian_pyramid(true, kernel, max_levels)
+    levels = min(len(pred_pyramid), len(true_pyramid))
+    loss = 0
+    for level in range(levels):
+        loss += (2 ** level) * F.l1_loss(pred_pyramid[level], true_pyramid[level])
+    return loss / levels
+
+
+'''
+def laplacian_loss(pred, true, max_levels=5):
+    if pred.ndim == 5:
+        B, T, C, H, W = pred.shape
+        pred = pred.view(B * T, C, H, W)
+        true = true.view(B * T, C, H, W)
     kernel = gauss_kernel(device=pred.device, dtype=pred.dtype)
     pred_pyramid = laplacian_pyramid(pred, kernel, max_levels)
     true_pyramid = laplacian_pyramid(true, kernel, max_levels)
@@ -58,6 +71,21 @@ def laplacian_pyramid(img, kernel, max_levels):
     current = img
     pyramid = []
     for _ in range(max_levels):
+        current = crop_to_even_size(current)
+        down = downsample(current, kernel)
+        up = upsample(down, kernel)
+        diff = current - up
+        pyramid.append(diff)
+        current = down
+    return pyramid
+'''
+def laplacian_pyramid(img, kernel, max_levels):
+    current = img
+    pyramid = []
+    for _ in range(max_levels):
+        H, W = current.shape[2:]
+        if H <= 4 or W <= 4:
+            break  # stop before padding breaks
         current = crop_to_even_size(current)
         down = downsample(current, kernel)
         up = upsample(down, kernel)

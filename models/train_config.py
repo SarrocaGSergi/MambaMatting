@@ -57,8 +57,8 @@ DATA_PATHS = {
     },
 
     'imagematte': {
-        'train':  _ROOT_ / 'matting-data/P3M-10k/train',
-        'valid':  _ROOT_ / 'matting-data/P3M-10k/val',
+        'train':  _ROOT_ / 'matting-data/ImageMatte/train',
+        'valid':  _ROOT_ / 'matting-data/ImageMatte/val',
     },
 
     'am2k': {
@@ -75,6 +75,7 @@ DATA_PATHS = {
         'train':  _ROOT_ / 'matting-data/image-matte/AIM/train',
         'valid':  _ROOT_ / 'matting-data/image-matte/AIM/val',
     },
+
     'h646': {
         'train':  _ROOT_ / 'matting-data/image-matte/H646/train',
         'valid':  _ROOT_ / 'matting-data/image-matte/H646/val',
